@@ -3,6 +3,7 @@ namespace CrimeAPI;
 
 class API_Router 
 {
+    const API_RESULT_PAGE_LIMIT = 100;
     const MAX_IMPORT_LENGTH = 15000;
 
     public static $instance;
@@ -26,84 +27,128 @@ class API_Router
 
         switch ( $_GET['get'] ?? false )
         {
-            case 'crime-counts' :
+            case 'address-by-type' :
+                $crime_code_description = $_GET['crime_desc'] ?? false;
+
+                if ( !$crime_code_description ) return $this->json_response([
+                    'success' => false,
+                    'message' => 'Please pass the crime code description field.'
+                ]);
+
+                $limit = self::API_RESULT_PAGE_LIMIT;
+                $paging = $this->generate_paging_clause( $_GET['page'] ?? 1, $limit );
+
                 $sql = "
-                    SELECT 
-                        COUNT(*) as total,
-                        crime_name2 as crime_name
+                    SELECT SQL_CALC_FOUND_ROWS
+                        incident_id, dr_no, location_name, location_cross_street, latitude, longitude
                     FROM
-                        incidents
+                         incidents
                     WHERE
-                        crime_name2 <> ''
-                    GROUP BY crime_name2
-                    ORDER BY crime_name2
+                        LOWER( crime_code_description ) LIKE LOWER( %s )
+                    ORDER BY date_reported DESC
+                    $paging
                 ";
+                $sql = $wpdb->prepare( $sql, $crime_code_description );
                 $results = $wpdb->get_results( $sql );
-                $final = [];
-                foreach ( $results as $item )
-                {
-                    $final[ $item->crime_name ] = (int) $item->total;
-                }
-                $this->json_response( $final, "crime-counts.json" );
                 break;
 
-            case 'crime-type-address' :
-                if ( !( $_GET['crime-type'] ?? false ) ) $this->json_response( [] );
-                
+            case 'crimes-in-area' :
+                $area_name = $_GET['area'] ?? false;
+
+                if ( !$area_name ) return $this->json_response([
+                    'success' => false,
+                    'message' => 'Property field empty.'
+                ]);
+
+                $limit = self::API_RESULT_PAGE_LIMIT;
+                $paging = $this->generate_paging_clause( $_GET['page'] ?? 1, $limit );
+
                 $sql = "
-                    SELECT
-                        incident_id,
-                        block_address,
-                        crime_name1,
-                        crime_name2,
-                        crime_name3,
-                        city,
-                        state,
-                        zip,
-                        place 
+                    SELECT SQL_CALC_FOUND_ROWS
+                        *
                     FROM
-                        incidents
-                    WHERE 
-                        crime_name1 LIKE %s
-                        OR crime_name2 LIKE %s
-                        OR crime_name3 LIKE %s
-                    ORDER BY
-                        incident_id ASC
+                         incidents
+                    WHERE
+                        LOWER( area_name ) LIKE LOWER( %s )
+                    ORDER BY date_reported DESC
+                    $paging
                 ";
-                $sql = $wpdb->prepare( $sql, $_GET['crime-type'], $_GET['crime-type'], $_GET['crime-type'] );
+                $sql = $wpdb->prepare( $sql, $area_name );
                 $results = $wpdb->get_results( $sql );
-                $this->json_response([
-                    'total_records' => (int) \count( $results ),
-                    'district' => $results
-                ]);
                 break;
 
-            case 'crimes-in-district' :
-                if ( !( $_GET['district'] ?? false ) ) $this->json_response( [] );
-                $sql = "SELECT COUNT( * ) FROM incidents WHERE LOWER( police_district_name ) = LOWER( %s ) ORDER BY incident_id ASC";
-                $sql = $wpdb->prepare( $sql, $_GET['district'] );
-                $total = $wpdb->get_var( $sql );
-                $this->json_response([
-                    'total_records' => (int) $total,
-                    'district' => $_GET['district']
-                ]);
-                break;
+            case 'all' :
+                $column = \strtolower( $_GET['property'] ?? false );
 
-            case 'police_district_name' :
-            case 'crime_name3' :
-            case 'crime_name2' :
-            case 'crime_name1' :
-                $sql = "SELECT DISTINCT %s FROM incidents WHERE %s <> '' ORDER BY crime_name1 ASC;";
-                $sql = \sprintf( $sql, $_GET['get'], $_GET['get'] );
+                if ( !$column ) return $this->json_response([
+                    'success' => false,
+                    'message' => 'Property field empty.'
+                ]);
+
+                // confirm column
+                $table_desc = $wpdb->get_results( 'DESCRIBE incidents' );
+                $columns = [];
+
+                foreach ( $table_desc as $col )
+                    $columns[ \strtolower( $col->Field ) ] = $col->Field;
+
+                if ( !isset( $columns[ $column ] ) ) return $this->json_response([
+                    'success' => false,
+                    'message' => 'Invalid property name.'
+                ]);
+
+                $column = $columns[ $column ];
+
+                $limit = self::API_RESULT_PAGE_LIMIT;
+                $paging = $this->generate_paging_clause( $_GET['page'] ?? 1, $limit );
+
+                $sql = "
+                    SELECT SQL_CALC_FOUND_ROWS
+                        DISTINCT $column 
+                    FROM
+                         incidents
+                    ORDER BY $column ASC
+                    $paging
+                ";
+
                 $results = $wpdb->get_col( $sql );
-                $this->json_response( $results );
                 break;
 
             case 'import' :
-                $this->import();
+                return $this->import();
+                break;
+
+            default :
+                return $this->json_response([
+                    'success' => false,
+                    'message' => 'Invalid request.'
+                ]);
                 break;
         }
+
+        $found_rows = (int) $wpdb->get_var( 'SELECT FOUND_ROWS()' );
+
+        return $this->json_response([
+            'request' => $_GET,
+            'success' => true,
+            'page' => \intval( $_GET['page'] ?? 1 ),
+            'total_pages' => \ceil( $found_rows / $limit ),
+            'results_per_page' => (int) $limit,
+            'found_results' => $found_rows,
+            'results' => $results
+        ]);
         die;
+    }
+
+    private function generate_paging_clause( $page, $limit = self::API_RESULT_PAGE_LIMIT )
+    {
+        global $wpdb;
+
+        if ( ! $page ) $page = 1;
+        $paging = "LIMIT %d, %d";
+        $start = ( $page - 1 ) * (int) $limit;
+
+        return $wpdb->prepare( $paging, $start, $limit );
     }
 
     private function json_response( $data, $filename = false )
@@ -130,39 +175,37 @@ class API_Router
         global $wpdb;
 
         $columns = [
-            'incident_id',
-            'offence_code',
-            'cr_number',
-            'datetime_dispatch',
-            'nibrs_code',
-            'victims',
-            'crime_name1',
-            'crime_name2',
-            'crime_name3',
-            'police_district_name',
-            'block_address',
-            'city',
-            'state',
-            'zip',
-            'agency',
-            'place',
-            'sector',
-            'beat',
-            'pra',
-            'address_number',
-            'street_prefix',
-            'street_name',
-            'street_suffix',
-            'street_type',
-            'datetime_start',
-            'datetime_end',
+            'dr_no',
+            'date_reported',
+            'date_occ',
+            'time_occ',
+            'area_code',
+            'area_name',
+            'report_district_no',
+            'part12',
+            'crime_code',
+            'crime_code_description',
+            'mo_codes',
+            'victim_age',
+            'victim_sec',
+            'victim_descent',
+            'premis_code',
+            'premis_description',
+            'weapon_code',
+            'weapon_description',
+            'crime_status',
+            'crime_status_description',
+            'crime_code1',
+            'crime_code2',
+            'crime_code3',
+            'crime_code4',
+            'location_name',
+            'location_cross_street',
             'latitude',
             'longitude',
-            'police_district_number',
-            'incident_location'
         ];
 
-        $file = __DIR__ . '/../_meta/crime.csv';
+        $file = __DIR__ . '/../_meta/crime-la.csv';
 
         $row = 0;
         if ( $f = \fopen( $file, 'rb' ) )
@@ -170,13 +213,20 @@ class API_Router
             while ( $line = \fgetcsv( $f, 2048 ) )
             {
                 $row++;
-
                 if ( $row == 1 ) continue;
 
                 $data = \array_combine( $columns, $line );
-                $data['datetime_dispatch'] = \date_i18n( 'YmdHis', \strtotime( $data['datetime_dispatch'] ) );
-                $data['datetime_start'] = \date_i18n( 'YmdHis', \strtotime( $data['datetime_start'] ) );
-                $data['datetime_end'] = \date_i18n( 'YmdHis', \strtotime( $data['datetime_end'] ) );
+                
+                $data['incident_id'] = '';
+                $data['date_occ'] = \date_i18n( 'Ymd', \strtotime( $data['date_occ'] ) );
+                $data['date_reported'] = \date_i18n( 'Ymd', \strtotime( $data['date_reported'] ) );
+                
+                if ( \strlen( $data['time_occ'] ) < 4 )
+                    $data['time_occ'] = '0' . $data['time_occ'];
+                    
+                $data['time_occ'] = \substr( $data['time_occ'], 0, 2 ) . ':' . \substr( $data['time_occ'], -2 );
+                $data['time_occ'] = \date_i18n( 'His', \strtotime( '2022-01-01 ' . $data['date_occ'] ) );
+                
                 $wpdb->insert( 'incidents', $data );
 
                 if ( $row > self::MAX_IMPORT_LENGTH ) break;
