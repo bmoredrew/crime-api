@@ -25,3 +25,8 @@
 /crime-api/?get=address-by-type&crime_desc=burglary&page=4
 /crime-api/?get=address-by-type&crime_desc=vehicle+stolen
 ```
+
+
+### Output
+
+![output image](https://imgur.com/dY85rV9.png)
